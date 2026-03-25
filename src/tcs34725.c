@@ -4,6 +4,14 @@
 #include <stdio.h>
 #include <string.h>
 
+/*
+ * File: tcs34725.c
+ * Chức năng:
+ * - Driver cảm biến màu TCS34725.
+ * - Khởi tạo cảm biến, đọc ID, cấu hình gain/thời gian tích phân.
+ * - Đọc dữ liệu màu thô (R/G/B/C) và chuẩn hóa về thang dễ xử lý.
+ */
+
 char *st2;
 // Array to keep track of initialization status: index 0 for I2C1, index 1 for I2C2
 uint8_t _tcs34725Initialised[2] = {0, 0};

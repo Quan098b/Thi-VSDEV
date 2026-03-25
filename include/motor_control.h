@@ -1,6 +1,8 @@
 #ifndef MOTOR_CONTROL_H
 #define MOTOR_CONTROL_H
 
+/* Header khai báo các hàm điều khiển hướng và tốc độ động cơ */
+
 #include "stm32f10x.h"
 
 void MotorControl_Init(void);

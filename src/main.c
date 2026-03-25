@@ -5,6 +5,15 @@
 #include <stdio.h>
 #include <string.h>
 
+/*
+ * File: main.c
+ * Chức năng chính:
+ * - Khởi tạo UART, I2C, 2 cảm biến màu và module điều khiển động cơ.
+ * - Đọc màu từ 2 cảm biến để xác định hướng bám line.
+ * - Gửi log qua UART để debug trạng thái hệ thống.
+ * - Điều khiển xe đi thẳng, rẽ, phục hồi hoặc dừng tùy theo màu đọc được.
+ */
+
 /* Define color labels */
 typedef enum {
     COLOR_UNKNOWN = 0,
@@ -144,18 +153,22 @@ int main(void)
     unsigned int loopCounter = 0;
     const uint8_t logDivider = 6;
 
+    /* Khởi tạo LED debug để quan sát trạng thái sống của hệ thống */
     init_LED_PC13();
     Blink_LED();
 
+    /* Khởi tạo UART1 để in log ra serial monitor */
     Usart_Int(115200);
     log_line("[BOOT] USART DONE\r\n");
     log_line("[BOOT] START I2C1 I2C2 INIT...\r\n");
 
+    /* Khởi tạo hai kênh I2C cho hai cảm biến màu */
     I2C_Peripheral_Init(I2C1);
     I2C_Peripheral_Init(I2C2);
     log_line("[BOOT] I2C1 and I2C2 SETUP DONE\r\n");
     Blink_LED();
     log_line("[BOOT] START TCS34725 INIT...\r\n");
+    /* Khởi tạo từng cảm biến TCS34725 và kiểm tra phản hồi ID */
     tcs3272_init(I2C1);
     log_line("[BOOT] I2C1 INIT DONE!\r\n");
     tcs3272_init(I2C2);
@@ -163,6 +176,7 @@ int main(void)
     log_line("[BOOT] TCS34725 INIT DONE\r\n");
 
     log_line("[BOOT] START MOTOR INIT...\r\n");
+    /* Khởi tạo chân điều khiển động cơ, sau đó cho dừng an toàn */
     MotorControl_Init();
     Motor_Stop();
     log_line("[BOOT] MOTOR INIT DONE\r\n");
@@ -171,6 +185,7 @@ int main(void)
 
     while(1)
     {
+        /* Vòng lặp chính: đọc 2 cảm biến, xác định màu và đưa ra hướng điều khiển */
         loopCounter++;
         getRGB(I2C1, &normR1, &normG1, &normB1, &rawC1);
         color1 = detectColor(normR1, normG1, normB1, rawC1);
@@ -188,9 +203,17 @@ int main(void)
             USART_Send_bytes(st, strlen(st));
         }
 
+        /* leftOnLine/rightOnLine dùng để xác định cảm biến nào đang thấy màu hợp lệ để bám line */
         uint8_t leftOnLine = isRunColor(color1);
         uint8_t rightOnLine = isRunColor(color2);
 
+        /*
+         * Luật điều khiển:
+         * - Cả hai cảm biến đều thấy line: đi thẳng.
+         * - Chỉ cảm biến trái thấy line: rẽ trái.
+         * - Chỉ cảm biến phải thấy line: rẽ phải.
+         * - Cả hai đều mất line: chạy phục hồi một lúc rồi dừng.
+         */
         if (leftOnLine && rightOnLine) {
             uint16_t targetForwardPulse;
 

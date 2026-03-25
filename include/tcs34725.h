@@ -1,5 +1,6 @@
 #ifndef __TCS34725__H__
 #define __TCS34725__H__
+/* Header driver cảm biến màu TCS34725 */
 /* USER CODE BEGIN 0 */
 
 #include "stm32f10x.h"

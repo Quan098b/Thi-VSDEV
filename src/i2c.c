@@ -1,5 +1,17 @@
 #include "i2c.h"
 
+/*
+ * File: i2c.c
+ * Chức năng:
+ * - Khởi tạo I2C1 hoặc I2C2 tùy theo ngoại vi được truyền vào.
+ * - Cung cấp các hàm đọc/ghi I2C mức thấp cho cảm biến TCS34725.
+ * - Đây là lớp giao tiếp nền để driver cảm biến sử dụng.
+ *
+ * Lưu ý:
+ * - Các vòng while đang chờ cờ phần cứng không có timeout.
+ * - Nếu dây I2C hoặc cảm biến lỗi, chương trình có thể bị treo tại đây.
+ */
+
 /* Initialize I2C based on the selected peripheral (I2C1 or I2C2) */
 void I2C_Peripheral_Init(I2C_TypeDef* I2Cx)
 {

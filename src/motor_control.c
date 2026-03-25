@@ -1,5 +1,13 @@
 #include "motor_control.h"
 
+/*
+ * File: motor_control.c
+ * Chức năng:
+ * - Khởi tạo các chân GPIO điều khiển động cơ.
+ * - Điều khiển hướng chạy: tiến, lùi, rẽ trái, rẽ phải, dừng.
+ * - Tạo xung đơn giản bằng delay để thay đổi tốc độ.
+ */
+
 static void delay_cycles(uint32_t t)
 {
 	int i,j;

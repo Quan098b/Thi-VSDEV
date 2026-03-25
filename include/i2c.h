@@ -1,6 +1,8 @@
 #ifndef __I2C__H__
 #define __I2C__H__
 
+/* Header khai báo các hàm khởi tạo và đọc/ghi I2C dùng cho cảm biến */
+
 #include "stm32f10x.h"
 #include "stm32f10x_i2c.h"
 #include "stm32f10x_gpio.h"

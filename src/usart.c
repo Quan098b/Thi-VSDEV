@@ -1,5 +1,13 @@
 #include "usart.h"
 
+/*
+ * File: usart.c
+ * Chức năng:
+ * - Cấu hình UART1 để gửi log/debug từ STM32F103 ra máy tính.
+ * - TX dùng chân PA9, RX dùng chân PA10.
+ * - Cung cấp hàm gửi 1 byte và gửi cả chuỗi byte.
+ */
+
 void Usart_Int(uint32_t BaudRatePrescaler)
 {
 	GPIO_InitTypeDef GPIO_usartx;
