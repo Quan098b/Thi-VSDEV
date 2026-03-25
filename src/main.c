@@ -14,7 +14,7 @@ typedef struct {
     uint8_t valid;
 } ColorSample;
 
-/* =========================
+/* ==========================
    LED PC13
    ========================= */
 void init_LED_PC13(void)
