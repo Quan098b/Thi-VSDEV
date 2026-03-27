@@ -1,209 +1,546 @@
 #include "stm32f10x.h"
-#include "tcs34725.h"
 #include "i2c.h"
+#include "tcs34725.h"
 #include "usart.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdint.h>
+
+/* =========================================================
+   PIN MAP
+   =========================================================
+   LED1  : PA0
+   LED2  : PA1
+
+   BTN1  : PA2
+   BTN2  : PA3
+   BTN3  : PA4
+   BTN4  : PA5
+   BTN5  : PA6
+   BTN6  : PA7
+
+   SENSOR1: I2C1 -> PB6(SCL), PB7(SDA)
+
+   L298N
+   ENA = PB0
+   ENB = PB1
+   IN1 = PB12
+   IN2 = PB13
+   IN3 = PB14
+   IN4 = PB15
+   ========================================================= */
 
 typedef struct {
     int r;
     int g;
     int b;
     uint16_t c;
-    uint8_t valid;
-} ColorSample;
+} ColorData;
 
-/* ==========================
-   LED PC13
-   ========================= */
-void init_LED_PC13(void)
-{
-    RCC->APB2ENR |= (1 << 4);      // IOPCEN
-    GPIOC->CRH &= ~(0xF << 20);
-    GPIOC->CRH |=  (0x2 << 20);    // output 2MHz
-}
-
-void delay_simple(uint32_t t)
+/* =========================================================
+   DELAY
+   ========================================================= */
+static void delay_simple(volatile uint32_t t)
 {
     while (t--);
 }
 
-void Blink_LED(void)
-{
-    GPIOC->ODR &= ~(1 << 13);
-    delay_simple(300000);
-    GPIOC->ODR |= (1 << 13);
-    delay_simple(300000);
-}
-
-/* =========================
-   UART helper
-   ========================= */
-static void uart_send_text(const char *s)
+/* =========================================================
+   UART DEBUG
+   ========================================================= */
+static void uart_send(const char *s)
 {
     USART_Send_bytes((char *)s, (uint16_t)strlen(s));
 }
 
-static void uart_send_line(const char *s)
+/* =========================================================
+   RESET FLAGS
+   ========================================================= */
+static void print_reset_flags(void)
 {
-    uart_send_text(s);
-    uart_send_text("\r\n");
+    uint32_t csr = RCC->CSR;
+
+    if (csr & RCC_CSR_PORRSTF)  uart_send("RST: POR/PDR\r\n");
+    if (csr & RCC_CSR_PINRSTF)  uart_send("RST: NRST PIN\r\n");
+    if (csr & RCC_CSR_SFTRSTF)  uart_send("RST: SOFTWARE\r\n");
+    if (csr & RCC_CSR_IWDGRSTF) uart_send("RST: IWDG\r\n");
+    if (csr & RCC_CSR_WWDGRSTF) uart_send("RST: WWDG\r\n");
+    if (csr & RCC_CSR_LPWRRSTF) uart_send("RST: LOW POWER\r\n");
+
+    RCC->CSR |= RCC_CSR_RMVF;
 }
 
-static int uart_read_char_nonblock(char *ch)
+/* =========================================================
+   GPIO INIT
+   ========================================================= */
+static void GPIO_Init_All(void)
 {
-    if (USART1->SR & USART_SR_RXNE) {
-        *ch = (char)(USART1->DR & 0xFF);
-        return 1;
+    RCC->APB2ENR |= RCC_APB2ENR_IOPAEN;
+    RCC->APB2ENR |= RCC_APB2ENR_IOPBEN;
+
+    /* PA0, PA1 = output push-pull, 2MHz */
+    GPIOA->CRL &= ~((0xF << 0) | (0xF << 4));
+    GPIOA->CRL |=  ((0x2 << 0) | (0x2 << 4));
+
+    /* PA2..PA7 = input pull-up */
+    GPIOA->CRL &= ~((0xF << 8)  | (0xF << 12) | (0xF << 16) |
+                    (0xF << 20) | (0xF << 24) | (0xF << 28));
+    GPIOA->CRL |=  ((0x8 << 8)  | (0x8 << 12) | (0x8 << 16) |
+                    (0x8 << 20) | (0x8 << 24) | (0x8 << 28));
+
+    GPIOA->ODR |= (1 << 2) | (1 << 3) | (1 << 4) |
+                  (1 << 5) | (1 << 6) | (1 << 7);
+
+    /* PB0, PB1 = output push-pull, 2MHz (ENA, ENB) */
+    GPIOB->CRL &= ~((0xF << 0) | (0xF << 4));
+    GPIOB->CRL |=  ((0x2 << 0) | (0x2 << 4));
+
+    /* PB12..PB15 = output push-pull, 2MHz (IN1..IN4) */
+    GPIOB->CRH &= ~((0xF << 16) | (0xF << 20) | (0xF << 24) | (0xF << 28));
+    GPIOB->CRH |=  ((0x2 << 16) | (0x2 << 20) | (0x2 << 24) | (0x2 << 28));
+
+    /* LED off */
+    GPIOA->ODR &= ~((1 << 0) | (1 << 1));
+
+    /* Motor off */
+    GPIOB->ODR &= ~((1 << 0) | (1 << 1) | (1 << 12) | (1 << 13) | (1 << 14) | (1 << 15));
+}
+
+/* =========================================================
+   LED
+   ========================================================= */
+static void LED1_On(void)  { GPIOA->ODR |=  (1 << 0); }
+static void LED1_Off(void) { GPIOA->ODR &= ~(1 << 0); }
+
+static void LED2_On(void)  { GPIOA->ODR |=  (1 << 1); }
+static void LED2_Off(void) { GPIOA->ODR &= ~(1 << 1); }
+
+/* =========================================================
+   MOTOR - L298N
+   ========================================================= */
+static void Motor_Stop(void)
+{
+    GPIOB->ODR &= ~((1 << 0) | (1 << 1));                     /* ENA, ENB = 0 */
+    GPIOB->ODR &= ~((1 << 12) | (1 << 13) | (1 << 14) | (1 << 15));
+}
+
+static void Motor_Forward(void)
+{
+    /* Left motor forward */
+    GPIOB->ODR |=  (1 << 12);
+    GPIOB->ODR &= ~(1 << 13);
+
+    /* Right motor forward */
+    GPIOB->ODR |=  (1 << 14);
+    GPIOB->ODR &= ~(1 << 15);
+
+    /* Enable both channels */
+    GPIOB->ODR |= (1 << 0) | (1 << 1);
+}
+
+/* =========================================================
+   BUTTON RAW
+   Nhấn = mức 0
+   ========================================================= */
+static uint8_t button_raw_read(uint8_t btn)
+{
+    switch (btn) {
+        case 1: return (GPIOA->IDR & (1 << 2)) ? 1 : 0;
+        case 2: return (GPIOA->IDR & (1 << 3)) ? 1 : 0;
+        case 3: return (GPIOA->IDR & (1 << 4)) ? 1 : 0;
+        case 4: return (GPIOA->IDR & (1 << 5)) ? 1 : 0;
+        case 5: return (GPIOA->IDR & (1 << 6)) ? 1 : 0;
+        case 6: return (GPIOA->IDR & (1 << 7)) ? 1 : 0;
+        default: return 1;
+    }
+}
+
+/* =========================================================
+   Scan 6 buttons
+   ========================================================= */
+static uint8_t scan_button_event(void)
+{
+    static uint8_t raw_last = 0;
+    static uint8_t stable_state = 0;
+    static uint8_t debounce_cnt = 0;
+    uint8_t raw_now = 0;
+
+    if (button_raw_read(1) == 0) raw_now = 1;
+    else if (button_raw_read(2) == 0) raw_now = 2;
+    else if (button_raw_read(3) == 0) raw_now = 3;
+    else if (button_raw_read(4) == 0) raw_now = 4;
+    else if (button_raw_read(5) == 0) raw_now = 5;
+    else if (button_raw_read(6) == 0) raw_now = 6;
+    else raw_now = 0;
+
+    if (raw_now != raw_last) {
+        raw_last = raw_now;
+        debounce_cnt = 0;
+        return 0;
+    }
+
+    if (debounce_cnt < 4) {
+        debounce_cnt++;
+        return 0;
+    }
+
+    if (stable_state != raw_now) {
+        stable_state = raw_now;
+        if (stable_state != 0) {
+            return stable_state;
+        }
+    }
+
+    return 0;
+}
+
+/* =========================================================
+   SENSOR
+   ========================================================= */
+static void Sensor_Init_One(void)
+{
+    I2C_Peripheral_Init(I2C1);
+    uart_send("I2C1 INIT DONE\r\n");
+
+    tcs3272_init(I2C1);
+    delay_simple(200000);
+    uart_send("SENSOR 1 INIT DONE\r\n");
+}
+
+static void read_sensor_1(ColorData *d)
+{
+    getRGB(I2C1, &d->r, &d->g, &d->b, &d->c);
+}
+
+/* =========================================================
+   COLOR SAVE / DETECT
+   ========================================================= */
+static ColorData saved_colors[5];
+static uint8_t   saved_valid[5] = {0, 0, 0, 0, 0};
+
+static uint8_t capture_active = 0;
+static uint8_t capture_slot   = 0xFF;   /* 0..4 */
+
+static uint32_t cap_sum_r = 0;
+static uint32_t cap_sum_g = 0;
+static uint32_t cap_sum_b = 0;
+static uint32_t cap_sum_c = 0;
+static uint16_t cap_count = 0;
+
+static uint8_t detect_mode = 0;
+
+static uint8_t has_any_saved_color(void)
+{
+    uint8_t i;
+    for (i = 0; i < 5; i++) {
+        if (saved_valid[i]) return 1;
     }
     return 0;
 }
 
-/* =========================
-   Color distance
-   ========================= */
-static uint32_t abs_i32(int x)
+static void reset_capture_buffer(void)
 {
-    return (x < 0) ? (uint32_t)(-x) : (uint32_t)x;
+    cap_sum_r = 0;
+    cap_sum_g = 0;
+    cap_sum_b = 0;
+    cap_sum_c = 0;
+    cap_count = 0;
 }
 
-static uint32_t color_distance_rgb(int r, int g, int b, const ColorSample *s)
+static void capture_add_one_sample(void)
 {
-    uint32_t dr = abs_i32(r - s->r);
-    uint32_t dg = abs_i32(g - s->g);
-    uint32_t db = abs_i32(b - s->b);
-    return dr + dg + db;
+    ColorData d;
+    read_sensor_1(&d);
+
+    cap_sum_r += (uint32_t)d.r;
+    cap_sum_g += (uint32_t)d.g;
+    cap_sum_b += (uint32_t)d.b;
+    cap_sum_c += (uint32_t)d.c;
+    cap_count++;
 }
 
-static int classify_to_index(int r, int g, int b, ColorSample samples[5])
+static void detect_stop(void)
 {
-    uint32_t bestDist = 0xFFFFFFFF;
-    int bestIndex = 0;
-    int i;
+    detect_mode = 0;
+    LED2_Off();
+    Motor_Stop();
+}
+
+static void capture_start(uint8_t slot)
+{
+    char st[64];
+
+    /* đang lấy màu thì tuyệt đối không cho motor chạy */
+    detect_stop();
+    Motor_Stop();
+
+    capture_active = 1;
+    capture_slot   = slot;
+    reset_capture_buffer();
+
+    capture_add_one_sample();   /* mẫu đầu tiên ngay lúc bắt đầu */
+
+    LED1_On();
+
+    sprintf(st, "BAT DAU LAY MAU %d\r\n", (int)(slot + 1));
+    uart_send(st);
+}
+
+static void capture_stop_and_save(void)
+{
+    char st[128];
+
+    capture_add_one_sample();   /* mẫu cuối ngay lúc dừng */
+
+    if (cap_count == 0) {
+        uart_send("KHONG CO DU LIEU DE LUU\r\n");
+        capture_active = 0;
+        capture_slot   = 0xFF;
+        LED1_Off();
+        Motor_Stop();
+        return;
+    }
+
+    saved_colors[capture_slot].r = (int)(cap_sum_r / cap_count);
+    saved_colors[capture_slot].g = (int)(cap_sum_g / cap_count);
+    saved_colors[capture_slot].b = (int)(cap_sum_b / cap_count);
+    saved_colors[capture_slot].c = (uint16_t)(cap_sum_c / cap_count);
+
+    saved_valid[capture_slot] = 1;
+
+    sprintf(st,
+            "LUU MAU %d => R=%d G=%d B=%d C=%u | N=%u\r\n",
+            (int)(capture_slot + 1),
+            saved_colors[capture_slot].r,
+            saved_colors[capture_slot].g,
+            saved_colors[capture_slot].b,
+            saved_colors[capture_slot].c,
+            (unsigned int)cap_count);
+    uart_send(st);
+
+    capture_active = 0;
+    capture_slot   = 0xFF;
+    LED1_Off();
+
+    /* lưu xong vẫn dừng motor, KHÔNG được chạy */
+    Motor_Stop();
+}
+
+/* =========================================================
+   Nhận diện theo tỷ lệ RGB chuẩn hóa
+   ========================================================= */
+static uint32_t color_distance_norm(const ColorData *a, const ColorData *b)
+{
+    int32_t sumA, sumB;
+    int32_t ar, ag, ab;
+    int32_t br, bg, bb;
+    int32_t dr, dg, db;
+
+    sumA = a->r + a->g + a->b;
+    sumB = b->r + b->g + b->b;
+
+    if (sumA <= 0 || sumB <= 0) {
+        return 0xFFFFFFFFUL;
+    }
+
+    ar = (int32_t)((a->r * 1000L) / sumA);
+    ag = (int32_t)((a->g * 1000L) / sumA);
+    ab = (int32_t)((a->b * 1000L) / sumA);
+
+    br = (int32_t)((b->r * 1000L) / sumB);
+    bg = (int32_t)((b->g * 1000L) / sumB);
+    bb = (int32_t)((b->b * 1000L) / sumB);
+
+    dr = ar - br;
+    dg = ag - bg;
+    db = ab - bb;
+
+    return (uint32_t)(dr * dr + dg * dg + db * db);
+}
+
+static int8_t classify_current_color(ColorData *current, uint32_t *best_dist)
+{
+    uint8_t i;
+    int8_t best_idx = -1;
+    uint32_t min_dist = 0xFFFFFFFFUL;
 
     for (i = 0; i < 5; i++) {
-        if (samples[i].valid) {
-            uint32_t d = color_distance_rgb(r, g, b, &samples[i]);
-            if (d < bestDist) {
-                bestDist = d;
-                bestIndex = i + 1;   // trả về 1..5
-            }
+        uint32_t d;
+
+        if (!saved_valid[i]) continue;
+
+        d = color_distance_norm(current, &saved_colors[i]);
+        if (d < min_dist) {
+            min_dist = d;
+            best_idx = (int8_t)i;
         }
     }
 
-    return bestIndex; // 0 nếu chưa có mẫu nào
+    if (best_dist != 0) {
+        *best_dist = min_dist;
+    }
+
+    return best_idx;
 }
 
-/* =========================
+static void detect_start(void)
+{
+    if (!has_any_saved_color()) {
+        uart_send("0\r\n");
+        detect_mode = 0;
+        LED2_Off();
+        Motor_Stop();
+        return;
+    }
+
+    detect_mode = 1;
+    LED2_On();
+    Motor_Stop();
+}
+
+static void process_detect_step(void)
+{
+    static int8_t last_idx = -2;
+    static int8_t last_action = -1; /* 0=stop, 1=forward */
+    ColorData cur;
+    uint32_t dist;
+    int8_t idx;
+    int8_t action;
+
+    /* chỉ BTN6 bật detect_mode mới được vào đây */
+    if (!detect_mode) {
+        Motor_Stop();
+        last_action = 0;
+        return;
+    }
+
+    read_sensor_1(&cur);
+    idx = classify_current_color(&cur, &dist);
+
+    /* chỉ in số khi màu đổi */
+    if (idx != last_idx) {
+        last_idx = idx;
+
+        if (idx >= 0) {
+            switch (idx + 1) {
+                case 1: uart_send("1\r\n"); break;
+                case 2: uart_send("2\r\n"); break;
+                case 3: uart_send("3\r\n"); break;
+                case 4: uart_send("4\r\n"); break;
+                case 5: uart_send("5\r\n"); break;
+                default: uart_send("0\r\n"); break;
+            }
+        } else {
+            uart_send("0\r\n");
+        }
+    }
+
+    /* màu 1,2,3 -> đi thẳng ; màu 4,5 hoặc không rõ -> dừng */
+    if ((idx == 0) || (idx == 1) || (idx == 2)) {
+        action = 1;
+    } else {
+        action = 0;
+    }
+
+    if (action != last_action) {
+        last_action = action;
+
+        if (action == 1) {
+            Motor_Forward();
+        } else {
+            Motor_Stop();
+        }
+    }
+}
+
+/* =========================================================
+   NHỊP LẤY MẪU / NHẬN DIỆN
+   ========================================================= */
+static void capture_process_step(void)
+{
+    static uint8_t div = 0;
+
+    if (!capture_active) return;
+    if (cap_count >= 40) return;
+
+    div++;
+    if (div < 8) return;
+    div = 0;
+
+    capture_add_one_sample();
+}
+
+static void detect_process_step(void)
+{
+    static uint8_t div = 0;
+
+    if (!detect_mode || capture_active) return;
+
+    div++;
+    if (div < 2) return;
+    div = 0;
+
+    process_detect_step();
+}
+
+/* =========================================================
    MAIN
-   ========================= */
+   ========================================================= */
 int main(void)
 {
-    int normR, normG, normB;
-    uint16_t rawC;
-    char rx;
-    char st[64];
-
-    ColorSample samples[5] = {
-        {0,0,0,0,0},
-        {0,0,0,0,0},
-        {0,0,0,0,0},
-        {0,0,0,0,0},
-        {0,0,0,0,0}
-    };
-
-    int waitingSample = 0;          // 0 = không chờ, 1..5 = đang chờ lưu mẫu số đó
-    int detectEnable = 0;           // 0 = không nhận diện, 1 = nhận diện
-    int currentClass = 0;
-    int lastPrintedClass = -1;
-
-    init_LED_PC13();
-    Blink_LED();
+    uint8_t key;
 
     Usart_Int(115200);
-    uart_send_line("");
-    uart_send_line("SYSTEM READY");
-    uart_send_line("Sensor: TCS34725 on I2C1 PB6/PB7");
-    uart_send_line("1..5: press once to wait, press same key again to save");
-    uart_send_line("m: toggle detect mode");
-    uart_send_line("");
+    uart_send("\r\nCOLOR SAVE + DETECT + MOTOR START\r\n");
+    print_reset_flags();
 
-    I2C_Peripheral_Init(I2C1);
-    tcs3272_init(I2C1);
+    GPIO_Init_All();
+    uart_send("GPIO INIT DONE\r\n");
+
+    Sensor_Init_One();
+    uart_send("READY\r\n");
+
+    /* khởi động luôn ở trạng thái dừng */
+    Motor_Stop();
 
     while (1)
     {
-        getRGB(I2C1, &normR, &normG, &normB, &rawC);
+        key = scan_button_event();
 
-        if (uart_read_char_nonblock(&rx)) {
-
-            if (rx >= '1' && rx <= '5') {
-                int key = rx - '0';
-
-                if (waitingSample == 0) {
-                    waitingSample = key;
-                    uart_send_text("WAIT ");
-                    USART_Send_bytes(&rx, 1);
-                    uart_send_text("\r\n");
-                    Blink_LED();
+        if (key != 0) {
+            if (capture_active) {
+                /* đang lấy mẫu thì chỉ nhận đúng nút hiện tại để lưu */
+                if ((key >= 1) && (key <= 5) && ((key - 1) == capture_slot)) {
+                    capture_stop_and_save();
+                } else if (key == 6) {
+                    uart_send("DANG LAY MAU\r\n");
                 }
-                else if (waitingSample == key) {
-                    samples[key - 1].r = normR;
-                    samples[key - 1].g = normG;
-                    samples[key - 1].b = normB;
-                    samples[key - 1].c = rawC;
-                    samples[key - 1].valid = 1;
-
-                    uart_send_text("SAVE ");
-                    USART_Send_bytes(&rx, 1);
-                    uart_send_text("\r\n");
-
-                    waitingSample = 0;
-                    Blink_LED();
-                    Blink_LED();
-                }
-                else {
-                    waitingSample = key;
-                    uart_send_text("WAIT ");
-                    USART_Send_bytes(&rx, 1);
-                    uart_send_text("\r\n");
-                    Blink_LED();
+                /* nút khác bỏ qua */
+            } else {
+                switch (key) {
+                    case 1: capture_start(0); break;
+                    case 2: capture_start(1); break;
+                    case 3: capture_start(2); break;
+                    case 4: capture_start(3); break;
+                    case 5: capture_start(4); break;
+                    case 6:
+                        if (!detect_mode) detect_start();
+                        else detect_stop();
+                        break;
+                    default:
+                        break;
                 }
             }
-            else if (rx == 'm' || rx == 'M') {
-                detectEnable = !detectEnable;
-                lastPrintedClass = -1;
-
-                if (detectEnable) {
-                    uart_send_line("DETECT ON");
-                } else {
-                    uart_send_line("DETECT OFF");
-                }
-                Blink_LED();
-            }
         }
 
-        /* Đang chờ lưu mẫu thì không nhận diện */
-        if (waitingSample != 0) {
-            delay_simple(200000);
-            continue;
+        capture_process_step();
+        detect_process_step();
+
+        /* chặn cứng: nếu chưa bật BTN6 thì motor luôn dừng */
+        if (!detect_mode) {
+            Motor_Stop();
         }
 
-        /* Chưa bật nhận diện thì không in */
-        if (!detectEnable) {
-            delay_simple(200000);
-            continue;
-        }
-
-        currentClass = classify_to_index(normR, normG, normB, samples);
-
-        if (currentClass != 0 && currentClass != lastPrintedClass) {
-            sprintf(st, "%d\r\n", currentClass);
-            uart_send_text(st);
-            lastPrintedClass = currentClass;
-        }
-
-        delay_simple(200000);
+        delay_simple(300);
     }
 }
