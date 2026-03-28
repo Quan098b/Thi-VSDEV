@@ -20,14 +20,6 @@
    BTN6  : PA7
 
    SENSOR1: I2C1 -> PB6(SCL), PB7(SDA)
-
-   L298N
-   ENA = PB0
-   ENB = PB1
-   IN1 = PB12
-   IN2 = PB13
-   IN3 = PB14
-   IN4 = PB15
    ========================================================= */
 
 typedef struct {
@@ -85,25 +77,14 @@ static void GPIO_Init_All(void)
     /* PA2..PA7 = input pull-up */
     GPIOA->CRL &= ~((0xF << 8)  | (0xF << 12) | (0xF << 16) |
                     (0xF << 20) | (0xF << 24) | (0xF << 28));
+
     GPIOA->CRL |=  ((0x8 << 8)  | (0x8 << 12) | (0x8 << 16) |
                     (0x8 << 20) | (0x8 << 24) | (0x8 << 28));
 
     GPIOA->ODR |= (1 << 2) | (1 << 3) | (1 << 4) |
                   (1 << 5) | (1 << 6) | (1 << 7);
 
-    /* PB0, PB1 = output push-pull, 2MHz (ENA, ENB) */
-    GPIOB->CRL &= ~((0xF << 0) | (0xF << 4));
-    GPIOB->CRL |=  ((0x2 << 0) | (0x2 << 4));
-
-    /* PB12..PB15 = output push-pull, 2MHz (IN1..IN4) */
-    GPIOB->CRH &= ~((0xF << 16) | (0xF << 20) | (0xF << 24) | (0xF << 28));
-    GPIOB->CRH |=  ((0x2 << 16) | (0x2 << 20) | (0x2 << 24) | (0x2 << 28));
-
-    /* LED off */
     GPIOA->ODR &= ~((1 << 0) | (1 << 1));
-
-    /* Motor off */
-    GPIOB->ODR &= ~((1 << 0) | (1 << 1) | (1 << 12) | (1 << 13) | (1 << 14) | (1 << 15));
 }
 
 /* =========================================================
@@ -114,29 +95,6 @@ static void LED1_Off(void) { GPIOA->ODR &= ~(1 << 0); }
 
 static void LED2_On(void)  { GPIOA->ODR |=  (1 << 1); }
 static void LED2_Off(void) { GPIOA->ODR &= ~(1 << 1); }
-
-/* =========================================================
-   MOTOR - L298N
-   ========================================================= */
-static void Motor_Stop(void)
-{
-    GPIOB->ODR &= ~((1 << 0) | (1 << 1));                     /* ENA, ENB = 0 */
-    GPIOB->ODR &= ~((1 << 12) | (1 << 13) | (1 << 14) | (1 << 15));
-}
-
-static void Motor_Forward(void)
-{
-    /* Left motor forward */
-    GPIOB->ODR |=  (1 << 12);
-    GPIOB->ODR &= ~(1 << 13);
-
-    /* Right motor forward */
-    GPIOB->ODR |=  (1 << 14);
-    GPIOB->ODR &= ~(1 << 15);
-
-    /* Enable both channels */
-    GPIOB->ODR |= (1 << 0) | (1 << 1);
-}
 
 /* =========================================================
    BUTTON RAW
@@ -156,7 +114,9 @@ static uint8_t button_raw_read(uint8_t btn)
 }
 
 /* =========================================================
-   Scan 6 buttons
+   QUÉT 6 NÚT CHUNG
+   - chỉ trả về 1 nút mỗi lần nhấn
+   - phải nhả nút rồi mới nhận lần tiếp theo
    ========================================================= */
 static uint8_t scan_button_event(void)
 {
@@ -263,16 +223,15 @@ static void detect_stop(void)
 {
     detect_mode = 0;
     LED2_Off();
-    Motor_Stop();
 }
 
 static void capture_start(uint8_t slot)
 {
     char st[64];
 
-    /* đang lấy màu thì tuyệt đối không cho motor chạy */
-    detect_stop();
-    Motor_Stop();
+    if (detect_mode) {
+        detect_stop();
+    }
 
     capture_active = 1;
     capture_slot   = slot;
@@ -297,7 +256,6 @@ static void capture_stop_and_save(void)
         capture_active = 0;
         capture_slot   = 0xFF;
         LED1_Off();
-        Motor_Stop();
         return;
     }
 
@@ -321,9 +279,6 @@ static void capture_stop_and_save(void)
     capture_active = 0;
     capture_slot   = 0xFF;
     LED1_Off();
-
-    /* lưu xong vẫn dừng motor, KHÔNG được chạy */
-    Motor_Stop();
 }
 
 /* =========================================================
@@ -387,37 +342,23 @@ static void detect_start(void)
 {
     if (!has_any_saved_color()) {
         uart_send("0\r\n");
-        detect_mode = 0;
-        LED2_Off();
-        Motor_Stop();
         return;
     }
 
     detect_mode = 1;
     LED2_On();
-    Motor_Stop();
 }
 
 static void process_detect_step(void)
 {
     static int8_t last_idx = -2;
-    static int8_t last_action = -1; /* 0=stop, 1=forward */
     ColorData cur;
     uint32_t dist;
     int8_t idx;
-    int8_t action;
-
-    /* chỉ BTN6 bật detect_mode mới được vào đây */
-    if (!detect_mode) {
-        Motor_Stop();
-        last_action = 0;
-        return;
-    }
 
     read_sensor_1(&cur);
     idx = classify_current_color(&cur, &dist);
 
-    /* chỉ in số khi màu đổi */
     if (idx != last_idx) {
         last_idx = idx;
 
@@ -432,23 +373,6 @@ static void process_detect_step(void)
             }
         } else {
             uart_send("0\r\n");
-        }
-    }
-
-    /* màu 1,2,3 -> đi thẳng ; màu 4,5 hoặc không rõ -> dừng */
-    if ((idx == 0) || (idx == 1) || (idx == 2)) {
-        action = 1;
-    } else {
-        action = 0;
-    }
-
-    if (action != last_action) {
-        last_action = action;
-
-        if (action == 1) {
-            Motor_Forward();
-        } else {
-            Motor_Stop();
         }
     }
 }
@@ -491,7 +415,7 @@ int main(void)
     uint8_t key;
 
     Usart_Int(115200);
-    uart_send("\r\nCOLOR SAVE + DETECT + MOTOR START\r\n");
+    uart_send("\r\nCOLOR SAVE + DETECT FAST FIX START\r\n");
     print_reset_flags();
 
     GPIO_Init_All();
@@ -499,9 +423,6 @@ int main(void)
 
     Sensor_Init_One();
     uart_send("READY\r\n");
-
-    /* khởi động luôn ở trạng thái dừng */
-    Motor_Stop();
 
     while (1)
     {
@@ -512,7 +433,8 @@ int main(void)
                 /* đang lấy mẫu thì chỉ nhận đúng nút hiện tại để lưu */
                 if ((key >= 1) && (key <= 5) && ((key - 1) == capture_slot)) {
                     capture_stop_and_save();
-                } else if (key == 6) {
+                }
+                else if (key == 6) {
                     uart_send("DANG LAY MAU\r\n");
                 }
                 /* nút khác bỏ qua */
@@ -535,11 +457,6 @@ int main(void)
 
         capture_process_step();
         detect_process_step();
-
-        /* chặn cứng: nếu chưa bật BTN6 thì motor luôn dừng */
-        if (!detect_mode) {
-            Motor_Stop();
-        }
 
         delay_simple(300);
     }
