@@ -7,20 +7,6 @@
 #include <string.h>
 #include <stdarg.h>
 
-/* =========================================================
-   PIN MAP
-   SENSOR_LEFT  : I2C1 -> PB6(SCL),  PB7(SDA)
-   SENSOR_RIGHT : I2C2 -> PB10(SCL), PB11(SDA)
-
-   L298N
-   ENA = PB0 = TIM3_CH3
-   ENB = PB1 = TIM3_CH4
-   IN1 = PB12
-   IN2 = PB13
-   IN3 = PB14
-   IN4 = PB15
-   ========================================================= */
-
 typedef struct {
     int r;
     int g;
@@ -46,8 +32,17 @@ typedef enum {
     MOVE_RIGHT
 } MoveState;
 
+typedef enum {
+    SIDE_NONE = 0,
+    SIDE_LEFT,
+    SIDE_RIGHT
+} SideState;
+
 /* =========================================================
    MAU MUC TIEU
+   0 = DO
+   1 = XANH DUONG
+   2 = XANH LA
    ========================================================= */
 static const int16_t allowed_norm[3][3] = {
     {744, 137, 118},   /* DO */
@@ -65,7 +60,7 @@ static const int16_t allowed_norm[3][3] = {
 #define MIN_EFFECTIVE_PWM       140U
 
 #define PWM_FORWARD             850U
-#define PWM_TURN_OUTER          680U /*phi nhanh*/
+#define PWM_TURN_OUTER          680U
 #define PWM_TURN_INNER          500U
 
 /* =========================================================
@@ -74,16 +69,8 @@ static const int16_t allowed_norm[3][3] = {
 #define SENSOR_LOOP_DELAY_MS    25U
 #define DEBUG_PRINT_MS          400U
 
-/* =========================================================
-   BAT/TAT DEBUG
-   0 = tat hoan toan
-   1 = in gon
-   ========================================================= */
 #define DEBUG_UART              1
 
-/* =========================================================
-   TIME BASE 1ms
-   ========================================================= */
 static volatile uint32_t g_ms_ticks = 0;
 
 void SysTick_Handler(void)
@@ -113,7 +100,7 @@ static void uart_send(const char *s)
 static void uart_printf(const char *fmt, ...)
 {
 #if DEBUG_UART
-    char buf[160];
+    char buf[180];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
@@ -132,11 +119,9 @@ static void GPIO_Init_All(void)
     RCC->APB2ENR |= RCC_APB2ENR_IOPBEN;
     RCC->APB2ENR |= RCC_APB2ENR_AFIOEN;
 
-    /* PB0, PB1 = AF push-pull */
     GPIOB->CRL &= ~((0xF << 0) | (0xF << 4));
     GPIOB->CRL |=  ((0xB << 0) | (0xB << 4));
 
-    /* PB12..PB15 = output push-pull */
     GPIOB->CRH &= ~((0xF << 16) | (0xF << 20) | (0xF << 24) | (0xF << 28));
     GPIOB->CRH |=  ((0x2 << 16) | (0x2 << 20) | (0x2 << 24) | (0x2 << 28));
 
@@ -305,10 +290,63 @@ static void sensor_read_and_classify(I2C_TypeDef *I2Cx, SensorResult *res)
     res->valid = 1;
 }
 
+/* =========================================================
+   BO NHO MAU TRUOC DO
+   ========================================================= */
+static int8_t g_prev_left_idx  = -1;
+static int8_t g_prev_right_idx = -1;
+static SideState g_last_new_side = SIDE_NONE;
+
+static void update_new_color_side(const SensorResult *left, const SensorResult *right)
+{
+    if (left->match) {
+        if (g_prev_left_idx != left->idx) {
+            g_last_new_side = SIDE_LEFT;
+        }
+        g_prev_left_idx = left->idx;
+    }
+
+    if (right->match) {
+        if (g_prev_right_idx != right->idx) {
+            g_last_new_side = SIDE_RIGHT;
+        }
+        g_prev_right_idx = right->idx;
+    }
+
+    if (!left->match) {
+        g_prev_left_idx = -1;
+    }
+
+    if (!right->match) {
+        g_prev_right_idx = -1;
+    }
+}
+
+/* =========================================================
+   LOGIC DIEU KHIEN
+   ========================================================= */
 static MoveState decide_move(const SensorResult *left, const SensorResult *right)
 {
     if ((!left->valid) && (!right->valid)) return MOVE_STOP;
-    if (left->match && right->match) return MOVE_FORWARD;
+
+    /* Ca 2 cam bien cung nhan */
+    if (left->match && right->match) {
+        /* Cung 1 mau -> di thang */
+        if (left->idx == right->idx) {
+            return MOVE_FORWARD;
+        }
+
+        /* 2 mau khac nhau -> cua theo ben vua nhan mau moi */
+        if (g_last_new_side == SIDE_LEFT) {
+            return MOVE_RIGHT;   /* giu logic dao huong hien tai */
+        }
+        if (g_last_new_side == SIDE_RIGHT) {
+            return MOVE_LEFT;    /* giu logic dao huong hien tai */
+        }
+
+        /* Neu chua xac dinh duoc ben moi -> tam uu tien dung */
+        return MOVE_STOP;
+    }
 
     /* Dao huong vi thuc te xe dang cua nguoc */
     if (left->match)  return MOVE_RIGHT;
@@ -340,16 +378,10 @@ static const char* short_name(const SensorResult *s)
     }
 }
 
-/* =========================================================
-   BIEN TINH TOAN CUC
-   ========================================================= */
 static SensorResult g_left;
 static SensorResult g_right;
 static uint32_t g_last_print_ms = 0;
 
-/* =========================================================
-   MAIN LOOP
-   ========================================================= */
 static void process_dual_sensor(void)
 {
     MoveState state;
@@ -358,15 +390,18 @@ static void process_dual_sensor(void)
     sensor_read_and_classify(I2C1, &g_left);
     sensor_read_and_classify(I2C2, &g_right);
 
+    update_new_color_side(&g_left, &g_right);
+
     state = decide_move(&g_left, &g_right);
     apply_move(state);
 
 #if DEBUG_UART
     if ((now - g_last_print_ms) >= DEBUG_PRINT_MS) {
         g_last_print_ms = now;
-        uart_printf("L:%s R:%s M:%d\r\n",
+        uart_printf("L:%s R:%s N:%d M:%d\r\n",
                     short_name(&g_left),
                     short_name(&g_right),
+                    (int)g_last_new_side,
                     (int)state);
     }
 #endif
@@ -374,9 +409,6 @@ static void process_dual_sensor(void)
     delay_ms_tick(SENSOR_LOOP_DELAY_MS);
 }
 
-/* =========================================================
-   MAIN
-   ========================================================= */
 int main(void)
 {
     SystemCoreClockUpdate();
