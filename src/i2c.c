@@ -1,135 +1,162 @@
 #include "i2c.h"
 
 /*
- * File: i2c.c
- * Chức năng:
- * - Khởi tạo I2C1 hoặc I2C2 tùy theo ngoại vi được truyền vào.
- * - Cung cấp các hàm đọc/ghi I2C mức thấp cho cảm biến TCS34725.
- * - Đây là lớp giao tiếp nền để driver cảm biến sử dụng.
- *
- * Lưu ý:
- * - Các vòng while đang chờ cờ phần cứng không có timeout.
- * - Nếu dây I2C hoặc cảm biến lỗi, chương trình có thể bị treo tại đây.
+ * i2c.c
+ * - Khoi tao I2C1 / I2C2
+ * - Co timeout de tranh treo vo han
+ * - Ham transmit / receive tra ve:
+ *      1 = thanh cong
+ *      0 = that bai / timeout
  */
 
-/* Initialize I2C based on the selected peripheral (I2C1 or I2C2) */
+#define I2C_TIMEOUT  ((uint32_t)100000UL)
+
+static int wait_flag_set(I2C_TypeDef* I2Cx, uint32_t flag)
+{
+    uint32_t timeout = I2C_TIMEOUT;
+    while (!I2C_GetFlagStatus(I2Cx, flag))
+    {
+        if (--timeout == 0) return 0;
+    }
+    return 1;
+}
+
+static int wait_flag_reset(I2C_TypeDef* I2Cx, uint32_t flag)
+{
+    uint32_t timeout = I2C_TIMEOUT;
+    while (I2C_GetFlagStatus(I2Cx, flag))
+    {
+        if (--timeout == 0) return 0;
+    }
+    return 1;
+}
+
+static int wait_event(I2C_TypeDef* I2Cx, uint32_t event)
+{
+    uint32_t timeout = I2C_TIMEOUT;
+    while (!I2C_CheckEvent(I2Cx, event))
+    {
+        if (--timeout == 0) return 0;
+    }
+    return 1;
+}
+
+/* Initialize I2C based on selected peripheral */
 void I2C_Peripheral_Init(I2C_TypeDef* I2Cx)
 {
     GPIO_InitTypeDef GPIO_InitStructure;
     I2C_InitTypeDef  I2C_InitStructure;
 
-    // Enable clock for GPIOB
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);
 
-    /* Configure Pins based on I2C instance */
-    if (I2Cx == I2C1) {
+    if (I2Cx == I2C1)
+    {
         RCC_APB1PeriphClockCmd(RCC_APB1Periph_I2C1, ENABLE);
-        // Configure PB6 (SCL) and PB7 (SDA) in Alternate function open-drain mode
         GPIO_InitStructure.GPIO_Pin = GPIO_Pin_6 | GPIO_Pin_7;
-    } else if (I2Cx == I2C2) {
+    }
+    else
+    {
         RCC_APB1PeriphClockCmd(RCC_APB1Periph_I2C2, ENABLE);
-        // Configure PB10 (SCL) and PB11 (SDA) in Alternate function open-drain mode
         GPIO_InitStructure.GPIO_Pin = GPIO_Pin_10 | GPIO_Pin_11;
     }
 
     GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_OD;
+    GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_AF_OD;
     GPIO_Init(GPIOB, &GPIO_InitStructure);
 
-    // Reset I2Cx to ensure initial state
     I2C_DeInit(I2Cx);
 
-    // Configure I2Cx parameters
-    I2C_InitStructure.I2C_ClockSpeed = 100000; // 100kHz
-    I2C_InitStructure.I2C_Mode = I2C_Mode_I2C;
-    I2C_InitStructure.I2C_DutyCycle = I2C_DutyCycle_2;
-    I2C_InitStructure.I2C_OwnAddress1 = 0x00; // Master address, not used
-    I2C_InitStructure.I2C_Ack = I2C_Ack_Enable;
+    I2C_InitStructure.I2C_ClockSpeed          = 100000;
+    I2C_InitStructure.I2C_Mode                = I2C_Mode_I2C;
+    I2C_InitStructure.I2C_DutyCycle           = I2C_DutyCycle_2;
+    I2C_InitStructure.I2C_OwnAddress1         = 0x00;
+    I2C_InitStructure.I2C_Ack                 = I2C_Ack_Enable;
     I2C_InitStructure.I2C_AcknowledgedAddress = I2C_AcknowledgedAddress_7bit;
 
     I2C_Init(I2Cx, &I2C_InitStructure);
-
-    // Enable I2Cx
     I2C_Cmd(I2Cx, ENABLE);
 }
 
-
-
-void I2C_Transmit(I2C_TypeDef* I2Cx, uint8_t slaveAddr, uint8_t *pData, uint16_t size)
+int I2C_Transmit(I2C_TypeDef* I2Cx, uint8_t slaveAddr, uint8_t *pData, uint16_t size)
 {
     uint16_t i;
-    while(I2C_GetFlagStatus(I2Cx, I2C_FLAG_BUSY)); // Wait until I2C is ready
 
-    // Generate START signal
+    if (!wait_flag_reset(I2Cx, I2C_FLAG_BUSY))
+        return 0;
+
     I2C_GenerateSTART(I2Cx, ENABLE);
-    // Wait until START is sent
-    while(!I2C_CheckEvent(I2Cx, I2C_EVENT_MASTER_MODE_SELECT));
+    if (!wait_event(I2Cx, I2C_EVENT_MASTER_MODE_SELECT))
+        return 0;
 
-    // Send slave address (write direction)
     I2C_Send7bitAddress(I2Cx, slaveAddr, I2C_Direction_Transmitter);
-    // Wait for ACK from slave
-    while(!I2C_CheckEvent(I2Cx, I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED));
+    if (!wait_event(I2Cx, I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED))
+        return 0;
 
-    // Send data
-    for(i = 0; i < size; i++)
+    for (i = 0; i < size; i++)
     {
         I2C_SendData(I2Cx, pData[i]);
-        // Wait for byte to be transmitted
-        while(!I2C_CheckEvent(I2Cx, I2C_EVENT_MASTER_BYTE_TRANSMITTED));
+        if (!wait_event(I2Cx, I2C_EVENT_MASTER_BYTE_TRANSMITTED))
+            return 0;
     }
 
-    // Generate STOP signal
     I2C_GenerateSTOP(I2Cx, ENABLE);
+    return 1;
 }
 
-void I2C_Receive(I2C_TypeDef* I2Cx, uint8_t slaveAddr, uint8_t *pData, uint16_t size)
+int I2C_Receive(I2C_TypeDef* I2Cx, uint8_t slaveAddr, uint8_t *pData, uint16_t size)
 {
     uint16_t i;
-    while(I2C_GetFlagStatus(I2Cx, I2C_FLAG_BUSY)); // Wait until I2C is ready
 
-    // Generate START signal
+    if (!wait_flag_reset(I2Cx, I2C_FLAG_BUSY))
+        return 0;
+
     I2C_GenerateSTART(I2Cx, ENABLE);
-    while(!I2C_CheckEvent(I2Cx, I2C_EVENT_MASTER_MODE_SELECT));
+    if (!wait_event(I2Cx, I2C_EVENT_MASTER_MODE_SELECT))
+        return 0;
 
-    // Send slave address with read direction
     I2C_Send7bitAddress(I2Cx, slaveAddr, I2C_Direction_Receiver);
-    while(!I2C_CheckEvent(I2Cx, I2C_EVENT_MASTER_RECEIVER_MODE_SELECTED));
+    if (!wait_event(I2Cx, I2C_EVENT_MASTER_RECEIVER_MODE_SELECTED))
+        return 0;
 
-    for(i = 0; i < size; i++)
+    for (i = 0; i < size; i++)
     {
-        // If it is the last byte, disable ACK to end reading
-        if(i == (size - 1))
+        if (i == (size - 1))
         {
             I2C_AcknowledgeConfig(I2Cx, DISABLE);
         }
 
-        // Wait for received data
-        while(!I2C_CheckEvent(I2Cx, I2C_EVENT_MASTER_BYTE_RECEIVED));
+        if (!wait_event(I2Cx, I2C_EVENT_MASTER_BYTE_RECEIVED))
+        {
+            I2C_AcknowledgeConfig(I2Cx, ENABLE);
+            I2C_GenerateSTOP(I2Cx, ENABLE);
+            return 0;
+        }
+
         pData[i] = I2C_ReceiveData(I2Cx);
     }
 
-    // Generate STOP signal
     I2C_GenerateSTOP(I2Cx, ENABLE);
-
-    // Re-enable ACK for next read
     I2C_AcknowledgeConfig(I2Cx, ENABLE);
+    return 1;
 }
 
 /* Wrapper functions for TCS34725 compatibility */
-void I2C_writeByte(I2C_TypeDef* I2Cx, uint8_t data, uint8_t address) {
-    I2C_Transmit(I2Cx, address, &data, 1);
+int I2C_writeByte(I2C_TypeDef* I2Cx, uint8_t data, uint8_t address)
+{
+    return I2C_Transmit(I2Cx, address, &data, 1);
 }
 
-void I2C_writeTwoByte(I2C_TypeDef* I2Cx, uint8_t* data, uint8_t address) {
-    I2C_Transmit(I2Cx, address, data, 2);
+int I2C_writeTwoByte(I2C_TypeDef* I2Cx, uint8_t* data, uint8_t address)
+{
+    return I2C_Transmit(I2Cx, address, data, 2);
 }
 
-uint8_t I2C_readByte(I2C_TypeDef* I2Cx, uint8_t address) {
-    uint8_t data;
-    I2C_Receive(I2Cx, address, &data, 1);
-    return data;
+int I2C_readByte(I2C_TypeDef* I2Cx, uint8_t address, uint8_t *data)
+{
+    return I2C_Receive(I2Cx, address, data, 1);
 }
 
-void I2C_readTwoByte(I2C_TypeDef* I2Cx, uint8_t address, uint8_t* data) {
-    I2C_Receive(I2Cx, address, data, 2);
+int I2C_readTwoByte(I2C_TypeDef* I2Cx, uint8_t address, uint8_t* data)
+{
+    return I2C_Receive(I2Cx, address, data, 2);
 }

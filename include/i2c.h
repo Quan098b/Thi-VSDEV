@@ -1,8 +1,6 @@
 #ifndef __I2C__H__
 #define __I2C__H__
 
-/* Header khai báo các hàm khởi tạo và đọc/ghi I2C dùng cho cảm biến */
-
 #include "stm32f10x.h"
 #include "stm32f10x_i2c.h"
 #include "stm32f10x_gpio.h"
@@ -12,13 +10,13 @@
 void I2C_Peripheral_Init(I2C_TypeDef* I2Cx);
 
 /* Generic transmit and receive functions */
-void I2C_Transmit(I2C_TypeDef* I2Cx, uint8_t slaveAddr, uint8_t *pData, uint16_t size);
-void I2C_Receive(I2C_TypeDef* I2Cx, uint8_t slaveAddr, uint8_t *pData, uint16_t size);
+int I2C_Transmit(I2C_TypeDef* I2Cx, uint8_t slaveAddr, uint8_t *pData, uint16_t size);
+int I2C_Receive(I2C_TypeDef* I2Cx, uint8_t slaveAddr, uint8_t *pData, uint16_t size);
 
 /* Wrapper functions required by TCS34725 */
-void I2C_writeByte(I2C_TypeDef* I2Cx, uint8_t data, uint8_t address);
-uint8_t I2C_readByte(I2C_TypeDef* I2Cx, uint8_t address);
-void I2C_writeTwoByte(I2C_TypeDef* I2Cx, uint8_t* data, uint8_t address);
-void I2C_readTwoByte(I2C_TypeDef* I2Cx, uint8_t address, uint8_t* data);
+int I2C_writeByte(I2C_TypeDef* I2Cx, uint8_t data, uint8_t address);
+int I2C_readByte(I2C_TypeDef* I2Cx, uint8_t address, uint8_t *data);
+int I2C_writeTwoByte(I2C_TypeDef* I2Cx, uint8_t* data, uint8_t address);
+int I2C_readTwoByte(I2C_TypeDef* I2Cx, uint8_t address, uint8_t* data);
 
-#endif //__I2C__H__
+#endif /* __I2C__H__ */
