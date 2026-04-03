@@ -1,11 +1,24 @@
 #include "stm32f10x.h"
+#include "usart.h"
 #include "i2c.h"
 #include "tcs34725.h"
-#include "usart.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
+
+typedef enum {
+    MOVE_STOP = 0,
+    MOVE_FORWARD,
+    MOVE_LEFT,
+    MOVE_RIGHT
+} MoveState;
+
+typedef struct {
+    int8_t idx;
+    uint8_t match;
+    uint8_t valid;
+} RemoteColor;
 
 typedef struct {
     int r;
@@ -25,53 +38,50 @@ typedef struct {
     uint8_t valid;
 } SensorResult;
 
-typedef enum {
-    MOVE_STOP = 0,
-    MOVE_FORWARD,
-    MOVE_LEFT,
-    MOVE_RIGHT
-} MoveState;
-
-typedef enum {
-    SIDE_NONE = 0,
-    SIDE_LEFT,
-    SIDE_RIGHT
-} SideState;
-
-/* =========================================================
-   MAU MUC TIEU
-   0 = DO
-   1 = XANH DUONG
-   2 = XANH LA
-   ========================================================= */
 static const int16_t allowed_norm[3][3] = {
-    {744, 137, 118},   /* DO */
-    {278, 343, 377},   /* XDUONG */
-    {292, 446, 261}    /* XLA */
+    {744, 137, 118},
+    {278, 343, 377},
+    {292, 446, 261}
 };
 
 #define MATCH_THRESHOLD         15000UL
+#define SENSOR_LOOP_DELAY_MS    10U
+#define DEBUG_PRINT_MS          150U
+#define DEBUG_UART              1
 
 /* =========================================================
-   PWM
+   REMOTE COLOR INPUT FROM SENDER BOARD
+   sender:   PA0=BIT0, PA1=BIT1, PA2=VALID
+   receiver: PA3=BIT0, PA4=BIT1, PA5=VALID
+   ========================================================= */
+#define REMOTE_PORT             GPIOA
+#define REMOTE_PIN_BIT0         GPIO_Pin_3
+#define REMOTE_PIN_BIT1         GPIO_Pin_4
+#define REMOTE_PIN_VALID        GPIO_Pin_5
+
+/* =========================================================
+   MOTOR MAP - L298N
+   ENA = PB0 = TIM3_CH3
+   ENB = PB1 = TIM3_CH4
+   IN1 = PB12
+   IN2 = PB13
+   IN3 = PB14
+   IN4 = PB15
    ========================================================= */
 #define PWM_PERIOD              999U
 #define SPEED_SCALE_PERCENT     25U
 #define MIN_EFFECTIVE_PWM       140U
-
 #define PWM_FORWARD             850U
 #define PWM_TURN_OUTER          680U
 #define PWM_TURN_INNER          500U
 
-/* =========================================================
-   THOI GIAN
-   ========================================================= */
-#define SENSOR_LOOP_DELAY_MS    25U
-#define DEBUG_PRINT_MS          400U
-
-#define DEBUG_UART              1
-
 static volatile uint32_t g_ms_ticks = 0;
+static uint32_t g_last_print_ms = 0;
+static SensorResult g_local_sensor;
+static int8_t g_last_remote_idx = -2;
+static uint8_t g_last_remote_valid = 2;
+static int8_t g_last_local_idx = -2;
+static uint8_t g_last_local_valid = 2;
 
 void SysTick_Handler(void)
 {
@@ -89,70 +99,67 @@ static void delay_ms_tick(uint32_t ms)
     while ((millis() - start) < ms);
 }
 
-/* =========================================================
-   UART
-   ========================================================= */
-static void uart_send(const char *s)
+static void uart_send_len(const char *s, uint16_t len)
 {
-    USART_Send_bytes((char *)s, (uint16_t)strlen(s));
+    USART_Send_bytes(s, len);
 }
 
 static void uart_printf(const char *fmt, ...)
 {
 #if DEBUG_UART
-    char buf[180];
+    char buf[96];
+    int n;
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
+    n = vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    uart_send(buf);
+    if (n > 0) {
+        if (n > (int)sizeof(buf)) n = (int)sizeof(buf);
+        uart_send_len(buf, (uint16_t)n);
+    }
 #else
     (void)fmt;
 #endif
 }
 
-/* =========================================================
-   GPIO
-   ========================================================= */
 static void GPIO_Init_All(void)
 {
+    RCC->APB2ENR |= RCC_APB2ENR_IOPAEN;
     RCC->APB2ENR |= RCC_APB2ENR_IOPBEN;
     RCC->APB2ENR |= RCC_APB2ENR_AFIOEN;
 
-    GPIOB->CRL &= ~((0xF << 0) | (0xF << 4));
-    GPIOB->CRL |=  ((0xB << 0) | (0xB << 4));
+    /* PB0, PB1 = AF push-pull for TIM3 PWM */
+    GPIOB->CRL &= ~((0xFU << 0) | (0xFU << 4));
+    GPIOB->CRL |=  ((0xBU << 0) | (0xBU << 4));
 
-    GPIOB->CRH &= ~((0xF << 16) | (0xF << 20) | (0xF << 24) | (0xF << 28));
-    GPIOB->CRH |=  ((0x2 << 16) | (0x2 << 20) | (0x2 << 24) | (0x2 << 28));
+    /* PB12..PB15 = output push-pull */
+    GPIOB->CRH &= ~((0xFU << 16) | (0xFU << 20) | (0xFU << 24) | (0xFU << 28));
+    GPIOB->CRH |=  ((0x2U << 16) | (0x2U << 20) | (0x2U << 24) | (0x2U << 28));
 
-    GPIOB->ODR &= ~((1 << 12) | (1 << 13) | (1 << 14) | (1 << 15));
+    /* PA3..PA5 = input pull-up for remote color */
+    GPIOA->CRL &= ~((0xFU << 12) | (0xFU << 16) | (0xFU << 20));
+    GPIOA->CRL |=  ((0x8U << 12) | (0x8U << 16) | (0x8U << 20));
+    GPIOA->ODR |= (1U << 3) | (1U << 4) | (1U << 5);
+
+    GPIOB->ODR &= ~((1U << 12) | (1U << 13) | (1U << 14) | (1U << 15));
 }
 
-/* =========================================================
-   PWM TIM3
-   ========================================================= */
 static void PWM_TIM3_Init(void)
 {
     RCC->APB1ENR |= RCC_APB1ENR_TIM3EN;
-
     TIM3->PSC = 71;
     TIM3->ARR = PWM_PERIOD;
     TIM3->CCR3 = 0;
     TIM3->CCR4 = 0;
-
     TIM3->CCMR2 = 0;
-    TIM3->CCMR2 |= TIM_CCMR2_OC3PE | (6 << 4);
-    TIM3->CCMR2 |= TIM_CCMR2_OC4PE | (6 << 12);
-
-    TIM3->CCER |= TIM_CCER_CC3E | TIM_CCER_CC4E;
-    TIM3->CR1  |= TIM_CR1_ARPE;
-    TIM3->EGR  |= TIM_EGR_UG;
-    TIM3->CR1  |= TIM_CR1_CEN;
+    TIM3->CCMR2 |= TIM_CCMR2_OC3PE | (6U << 4);
+    TIM3->CCMR2 |= TIM_CCMR2_OC4PE | (6U << 12);
+    TIM3->CCER  |= TIM_CCER_CC3E | TIM_CCER_CC4E;
+    TIM3->CR1   |= TIM_CR1_ARPE;
+    TIM3->EGR   |= TIM_EGR_UG;
+    TIM3->CR1   |= TIM_CR1_CEN;
 }
 
-/* =========================================================
-   MOTOR
-   ========================================================= */
 static uint16_t clamp_pwm(uint16_t v)
 {
     return (v > PWM_PERIOD) ? PWM_PERIOD : v;
@@ -161,23 +168,17 @@ static uint16_t clamp_pwm(uint16_t v)
 static uint16_t apply_speed_scale(uint16_t v)
 {
     uint32_t scaled = ((uint32_t)v * SPEED_SCALE_PERCENT) / 100U;
-
-    if ((scaled > 0U) && (scaled < MIN_EFFECTIVE_PWM)) {
-        scaled = MIN_EFFECTIVE_PWM;
-    }
-    if (scaled > PWM_PERIOD) {
-        scaled = PWM_PERIOD;
-    }
+    if ((scaled > 0U) && (scaled < MIN_EFFECTIVE_PWM)) scaled = MIN_EFFECTIVE_PWM;
+    if (scaled > PWM_PERIOD) scaled = PWM_PERIOD;
     return (uint16_t)scaled;
 }
 
 static void Motor_SetForwardDirection(void)
 {
-    GPIOB->ODR |=  (1 << 12);
-    GPIOB->ODR &= ~(1 << 13);
-
-    GPIOB->ODR |=  (1 << 14);
-    GPIOB->ODR &= ~(1 << 15);
+    GPIOB->ODR |=  (1U << 12);
+    GPIOB->ODR &= ~(1U << 13);
+    GPIOB->ODR |=  (1U << 14);
+    GPIOB->ODR &= ~(1U << 15);
 }
 
 static void Motor_SetPWM(uint16_t left_pwm, uint16_t right_pwm)
@@ -190,7 +191,7 @@ static void Motor_Stop(void)
 {
     TIM3->CCR3 = 0;
     TIM3->CCR4 = 0;
-    GPIOB->ODR &= ~((1 << 12) | (1 << 13) | (1 << 14) | (1 << 15));
+    GPIOB->ODR &= ~((1U << 12) | (1U << 13) | (1U << 14) | (1U << 15));
 }
 
 static void Motor_Forward(void)
@@ -211,16 +212,29 @@ static void Motor_Bias_Right(void)
     Motor_SetPWM(PWM_TURN_OUTER, PWM_TURN_INNER);
 }
 
-/* =========================================================
-   SENSOR
-   ========================================================= */
-static void Sensor_Init_All(void)
+static void remote_read_color(RemoteColor *res)
 {
-    I2C_Peripheral_Init(I2C1);
-    tcs3272_init(I2C1);
+    uint8_t valid = GPIO_ReadInputDataBit(REMOTE_PORT, REMOTE_PIN_VALID) ? 1U : 0U;
+    uint8_t bit0  = GPIO_ReadInputDataBit(REMOTE_PORT, REMOTE_PIN_BIT0) ? 1U : 0U;
+    uint8_t bit1  = GPIO_ReadInputDataBit(REMOTE_PORT, REMOTE_PIN_BIT1) ? 1U : 0U;
+    uint8_t code  = (uint8_t)((bit1 << 1) | bit0);
 
-    I2C_Peripheral_Init(I2C2);
-    tcs3272_init(I2C2);
+    if (!valid) {
+        res->idx = -1;
+        res->match = 0;
+        res->valid = 0;
+        return;
+    }
+
+    if (code <= 2U) {
+        res->idx = (int8_t)code;
+        res->match = 1;
+        res->valid = 1;
+    } else {
+        res->idx = -1;
+        res->match = 0;
+        res->valid = 0;
+    }
 }
 
 static void read_sensor_raw(I2C_TypeDef *I2Cx, ColorData *d)
@@ -228,20 +242,13 @@ static void read_sensor_raw(I2C_TypeDef *I2Cx, ColorData *d)
     getRGB(I2Cx, &d->r, &d->g, &d->b, &d->c);
 }
 
-/* =========================================================
-   COLOR
-   ========================================================= */
 static void calc_norm_rgb(const ColorData *src, int16_t *rn, int16_t *gn, int16_t *bn)
 {
     int32_t sum = src->r + src->g + src->b;
-
     if (sum <= 0) {
-        *rn = 0;
-        *gn = 0;
-        *bn = 0;
+        *rn = 0; *gn = 0; *bn = 0;
         return;
     }
-
     *rn = (int16_t)((src->r * 1000L) / sum);
     *gn = (int16_t)((src->g * 1000L) / sum);
     *bn = (int16_t)((src->b * 1000L) / sum);
@@ -253,12 +260,11 @@ static int8_t classify_from_norm(int16_t rn, int16_t gn, int16_t bn, uint32_t *b
     int8_t best_idx = -1;
     uint32_t min_dist = 0xFFFFFFFFUL;
 
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < 3U; i++) {
         int32_t dr = rn - allowed_norm[i][0];
         int32_t dg = gn - allowed_norm[i][1];
         int32_t db = bn - allowed_norm[i][2];
         uint32_t d = (uint32_t)(dr * dr + dg * dg + db * db);
-
         if (d < min_dist) {
             min_dist = d;
             best_idx = (int8_t)i;
@@ -269,9 +275,9 @@ static int8_t classify_from_norm(int16_t rn, int16_t gn, int16_t bn, uint32_t *b
     return best_idx;
 }
 
-static void sensor_read_and_classify(I2C_TypeDef *I2Cx, SensorResult *res)
+static void local_sensor_read_and_classify(SensorResult *res)
 {
-    read_sensor_raw(I2Cx, &res->raw);
+    read_sensor_raw(I2C1, &res->raw);
 
     if ((res->raw.r == 0) && (res->raw.g == 0) && (res->raw.b == 0) && (res->raw.c == 0)) {
         res->rn = 0;
@@ -290,67 +296,26 @@ static void sensor_read_and_classify(I2C_TypeDef *I2Cx, SensorResult *res)
     res->valid = 1;
 }
 
-/* =========================================================
-   BO NHO MAU TRUOC DO
-   ========================================================= */
-static int8_t g_prev_left_idx  = -1;
-static int8_t g_prev_right_idx = -1;
-static SideState g_last_new_side = SIDE_NONE;
-
-static void update_new_color_side(const SensorResult *left, const SensorResult *right)
+static char color_char_idx(int8_t idx, uint8_t valid, uint8_t match)
 {
-    if (left->match) {
-        if (g_prev_left_idx != left->idx) {
-            g_last_new_side = SIDE_LEFT;
-        }
-        g_prev_left_idx = left->idx;
-    }
-
-    if (right->match) {
-        if (g_prev_right_idx != right->idx) {
-            g_last_new_side = SIDE_RIGHT;
-        }
-        g_prev_right_idx = right->idx;
-    }
-
-    if (!left->match) {
-        g_prev_left_idx = -1;
-    }
-
-    if (!right->match) {
-        g_prev_right_idx = -1;
+    if (!valid) return 'E';
+    if (!match) return 'N';
+    switch (idx) {
+        case 0: return 'R';
+        case 1: return 'B';
+        case 2: return 'G';
+        default: return '?';
     }
 }
 
-/* =========================================================
-   LOGIC DIEU KHIEN
-   ========================================================= */
-static MoveState decide_move(const SensorResult *left, const SensorResult *right)
+static MoveState decide_move(const SensorResult *local, const RemoteColor *remote)
 {
-    if ((!left->valid) && (!right->valid)) return MOVE_STOP;
-
-    /* Ca 2 cam bien cung nhan */
-    if (left->match && right->match) {
-        /* Cung 1 mau -> di thang */
-        if (left->idx == right->idx) {
-            return MOVE_FORWARD;
-        }
-
-        /* 2 mau khac nhau -> cua theo ben vua nhan mau moi */
-        if (g_last_new_side == SIDE_LEFT) {
-            return MOVE_RIGHT;   /* giu logic dao huong hien tai */
-        }
-        if (g_last_new_side == SIDE_RIGHT) {
-            return MOVE_LEFT;    /* giu logic dao huong hien tai */
-        }
-
-        /* Neu chua xac dinh duoc ben moi -> tam uu tien dung */
-        return MOVE_STOP;
-    }
+    if ((!local->valid) && (!remote->valid)) return MOVE_STOP;
+    if (local->match && remote->match) return MOVE_FORWARD;
 
     /* Dao huong vi thuc te xe dang cua nguoc */
-    if (left->match)  return MOVE_RIGHT;
-    if (right->match) return MOVE_LEFT;
+    if (local->match) return MOVE_RIGHT;
+    if (remote->match) return MOVE_LEFT;
 
     return MOVE_STOP;
 }
@@ -365,44 +330,41 @@ static void apply_move(MoveState state)
     }
 }
 
-static const char* short_name(const SensorResult *s)
+static void Sensor_Init_Local(void)
 {
-    if (!s->valid) return "ERR";
-    if (!s->match) return "W";
-
-    switch (s->idx) {
-        case 0: return "R";
-        case 1: return "B";
-        case 2: return "G";
-        default: return "?";
-    }
+    I2C_Peripheral_Init(I2C1);
+    delay_ms_tick(10);
+    tcs3272_init(I2C1);
+    delay_ms_tick(10);
 }
 
-static SensorResult g_left;
-static SensorResult g_right;
-static uint32_t g_last_print_ms = 0;
-
-static void process_dual_sensor(void)
+static void process_remote_and_local(void)
 {
+    RemoteColor remote;
     MoveState state;
     uint32_t now = millis();
 
-    sensor_read_and_classify(I2C1, &g_left);
-    sensor_read_and_classify(I2C2, &g_right);
+    remote_read_color(&remote);
+    local_sensor_read_and_classify(&g_local_sensor);
 
-    update_new_color_side(&g_left, &g_right);
-
-    state = decide_move(&g_left, &g_right);
+    state = decide_move(&g_local_sensor, &remote);
     apply_move(state);
 
 #if DEBUG_UART
     if ((now - g_last_print_ms) >= DEBUG_PRINT_MS) {
+        char lc = color_char_idx(g_local_sensor.idx, g_local_sensor.valid, g_local_sensor.match);
+        char rc = color_char_idx(remote.idx, remote.valid, remote.match);
+
         g_last_print_ms = now;
-        uart_printf("L:%s R:%s N:%d M:%d\r\n",
-                    short_name(&g_left),
-                    short_name(&g_right),
-                    (int)g_last_new_side,
-                    (int)state);
+
+        if ((remote.idx != g_last_remote_idx) || (remote.valid != g_last_remote_valid) ||
+            (g_local_sensor.idx != g_last_local_idx) || (g_local_sensor.valid != g_last_local_valid)) {
+            g_last_remote_idx = remote.idx;
+            g_last_remote_valid = remote.valid;
+            g_last_local_idx = g_local_sensor.idx;
+            g_last_local_valid = g_local_sensor.valid;
+            uart_printf("L:%c R:%c M:%d\r\n", lc, rc, (int)state);
+        }
     }
 #endif
 
@@ -415,16 +377,15 @@ int main(void)
     SysTick_Config(SystemCoreClock / 1000U);
 
     Usart_Int(115200);
-    uart_send("RUN\r\n");
+    uart_send_len("RX RUN\r\n", 8);
 
     GPIO_Init_All();
     PWM_TIM3_Init();
-    Sensor_Init_All();
-
     Motor_Stop();
+    Sensor_Init_Local();
 
     while (1)
     {
-        process_dual_sensor();
+        process_remote_and_local();
     }
 }

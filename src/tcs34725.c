@@ -1,105 +1,74 @@
 #include "tcs34725.h"
 #include "usart.h"
 #include "i2c.h"
-#include <stdio.h>
 #include <string.h>
 
-/*
- * tcs34725.c
- * - Driver cam bien mau TCS34725
- * - Co kiem tra loi I2C
- * - Neu loi bus / khong ACK se khong treo vo han
- * - Bao loi qua UART
- */
-
-char *st2;
 uint8_t _tcs34725Initialised[2] = {0, 0};
-int red, green, blue;
-uint16_t timeOut = 100;
 
-/* Helper function to get index based on I2C instance */
-uint8_t getI2CIndex(I2C_TypeDef *I2Cx)
+static uint8_t getI2CIndex(I2C_TypeDef *I2Cx)
 {
-    return (I2Cx == I2C1) ? 0 : 1;
+    return (I2Cx == I2C1) ? 0U : 1U;
 }
 
-/* Tao khoang thoi gian tre 1 mili giay */
+static void uart_puts_fast(const char *s)
+{
+    USART_Send_bytes(s, (uint16_t)strlen(s));
+}
+
 void Delay_ms(uint32_t ms)
 {
-    uint32_t i, j;
-    for (i = 0; i <= ms; i++)
-        for (j = 0; j <= 8000; j++);
+    volatile uint32_t i, j;
+    for (i = 0; i < ms; i++)
+        for (j = 0; j < 8000U; j++)
+            __NOP();
 }
 
-/* Writes a register and an 8 bit value over I2Cx */
 int write8(I2C_TypeDef *I2Cx, uint8_t reg, uint32_t value)
 {
     uint8_t txBuffer[2];
-    txBuffer[0] = (TCS34725_COMMAND_BIT | reg);
-    txBuffer[1] = (value & 0xFF);
-
+    txBuffer[0] = (uint8_t)(TCS34725_COMMAND_BIT | reg);
+    txBuffer[1] = (uint8_t)(value & 0xFFU);
     return I2C_writeTwoByte(I2Cx, txBuffer, TCS34725_ADDRESS);
 }
 
-/* Reads an 8 bit value over I2Cx */
 int read8(I2C_TypeDef *I2Cx, uint8_t reg, uint8_t *value)
 {
-    uint8_t cmd = (TCS34725_COMMAND_BIT | reg);
-
-    if (!I2C_writeByte(I2Cx, cmd, TCS34725_ADDRESS))
-        return 0;
-
-    if (!I2C_readByte(I2Cx, TCS34725_ADDRESS, value))
-        return 0;
-
+    uint8_t cmd = (uint8_t)(TCS34725_COMMAND_BIT | reg);
+    if (!I2C_writeByte(I2Cx, cmd, TCS34725_ADDRESS)) return 0;
+    if (!I2C_readByte(I2Cx, TCS34725_ADDRESS, value)) return 0;
     return 1;
 }
 
-/* Reads a 16 bit value over I2Cx */
 int read16(I2C_TypeDef *I2Cx, uint8_t reg, uint16_t *ret)
 {
-    uint8_t cmd = (TCS34725_COMMAND_BIT | reg);
+    uint8_t cmd = (uint8_t)(TCS34725_COMMAND_BIT | reg);
     uint8_t rxBuffer[2];
-
-    if (!I2C_writeByte(I2Cx, cmd, TCS34725_ADDRESS))
-        return 0;
-
-    if (!I2C_readTwoByte(I2Cx, TCS34725_ADDRESS, rxBuffer))
-        return 0;
-
-    *ret = ((uint16_t)rxBuffer[1] << 8) | (rxBuffer[0] & 0xFF);
+    if (!I2C_writeByte(I2Cx, cmd, TCS34725_ADDRESS)) return 0;
+    if (!I2C_readTwoByte(I2Cx, TCS34725_ADDRESS, rxBuffer)) return 0;
+    *ret = ((uint16_t)rxBuffer[1] << 8) | rxBuffer[0];
     return 1;
 }
 
 int enable(I2C_TypeDef *I2Cx)
 {
-    if (!write8(I2Cx, TCS34725_ENABLE, TCS34725_ENABLE_PON))
-        return 0;
+    if (!write8(I2Cx, TCS34725_ENABLE, TCS34725_ENABLE_PON)) return 0;
     Delay_ms(3);
-
-    if (!write8(I2Cx, TCS34725_ENABLE, TCS34725_ENABLE_PON | TCS34725_ENABLE_AEN))
-        return 0;
+    if (!write8(I2Cx, TCS34725_ENABLE, TCS34725_ENABLE_PON | TCS34725_ENABLE_AEN)) return 0;
     Delay_ms(24);
-
     return 1;
 }
 
 int disable(I2C_TypeDef *I2Cx)
 {
-    uint8_t reg = 0;
-
-    if (!read8(I2Cx, TCS34725_ENABLE, &reg))
-        return 0;
-
-    if (!write8(I2Cx, TCS34725_ENABLE, reg & ~(TCS34725_ENABLE_PON | TCS34725_ENABLE_AEN)))
-        return 0;
-
+    uint8_t reg;
+    if (!read8(I2Cx, TCS34725_ENABLE, &reg)) return 0;
+    if (!write8(I2Cx, TCS34725_ENABLE, reg & (uint8_t)~(TCS34725_ENABLE_PON | TCS34725_ENABLE_AEN))) return 0;
     return 1;
 }
 
-int setIntegrationTime(I2C_TypeDef *I2Cx, uint8_t itime)
+int setIntegrationTime(I2C_TypeDef *I2Cx, uint8_t it)
 {
-    return write8(I2Cx, TCS34725_ATIME, itime);
+    return write8(I2Cx, TCS34725_ATIME, it);
 }
 
 int setGain(I2C_TypeDef *I2Cx, uint8_t gain)
@@ -110,127 +79,70 @@ int setGain(I2C_TypeDef *I2Cx, uint8_t gain)
 void tcs3272_init(I2C_TypeDef *I2Cx)
 {
     uint8_t readValue = 0;
-    char st3[32];
+    uint8_t idx = getI2CIndex(I2Cx);
 
-    st2 = "Khoi tao TCS34725!\r\n";
-    USART_Send_bytes(st2, strlen(st2));
+    _tcs34725Initialised[idx] = 0;
 
-    if (!read8(I2Cx, TCS34725_ID, &readValue))
-    {
-        st2 = "LOI: Khong doc duoc ID qua I2C!\r\n";
-        USART_Send_bytes(st2, strlen(st2));
-        _tcs34725Initialised[getI2CIndex(I2Cx)] = 0;
+    if (!read8(I2Cx, TCS34725_ID, &readValue)) {
+        uart_puts_fast("TCS ERR\r\n");
         return;
     }
 
-    sprintf(st3, "ID: %x\r\n", readValue);
-    USART_Send_bytes(st3, strlen(st3));
-
-    if ((readValue != 0x44) && (readValue != 0x4d))
-    {
-        st2 = "Khong khop dia chi I2C!\r\n";
-        USART_Send_bytes(st2, strlen(st2));
-        _tcs34725Initialised[getI2CIndex(I2Cx)] = 0;
+    if ((readValue != 0x44U) && (readValue != 0x4DU)) {
+        uart_puts_fast("TCS ID ERR\r\n");
         return;
     }
 
-    st2 = "Khop dia chi THANH CONG!\r\n";
-    USART_Send_bytes(st2, strlen(st2));
-
-    st2 = "Thiet lap TIME INTERGRATION!*******\r\n";
-    USART_Send_bytes(st2, strlen(st2));
-    if (!setIntegrationTime(I2Cx, TCS34725_INTEGRATIONTIME_101MS))
-    {
-        st2 = "LOI: Ghi ATIME that bai!\r\n";
-        USART_Send_bytes(st2, strlen(st2));
-        _tcs34725Initialised[getI2CIndex(I2Cx)] = 0;
+    if (!setIntegrationTime(I2Cx, TCS34725_INTEGRATIONTIME_101MS)) {
+        uart_puts_fast("TCS AT ERR\r\n");
         return;
     }
+
     Delay_ms(3);
 
-    st2 = "*****Thiet lap GAIN!******\r\n";
-    USART_Send_bytes(st2, strlen(st2));
-    if (!setGain(I2Cx, TCS34725_GAIN_4X))
-    {
-        st2 = "LOI: Ghi GAIN that bai!\r\n";
-        USART_Send_bytes(st2, strlen(st2));
-        _tcs34725Initialised[getI2CIndex(I2Cx)] = 0;
+    if (!setGain(I2Cx, TCS34725_GAIN_4X)) {
+        uart_puts_fast("TCS G ERR\r\n");
         return;
     }
 
-    st2 = "*****Cho phep TCS34725******\r\n";
-    USART_Send_bytes(st2, strlen(st2));
-    if (!enable(I2Cx))
-    {
-        st2 = "LOI: Enable TCS34725 that bai!\r\n";
-        USART_Send_bytes(st2, strlen(st2));
-        _tcs34725Initialised[getI2CIndex(I2Cx)] = 0;
+    if (!enable(I2Cx)) {
+        uart_puts_fast("TCS EN ERR\r\n");
         return;
     }
 
-    _tcs34725Initialised[getI2CIndex(I2Cx)] = 1;
-
-    st2 = "Cho phep THANH CONG!!!!!!!!!\r\n";
-    USART_Send_bytes(st2, strlen(st2));
+    _tcs34725Initialised[idx] = 1;
+    uart_puts_fast("TCS OK\r\n");
 }
 
-/* Get raw data */
 void getRawData(I2C_TypeDef *I2Cx, uint16_t *r, uint16_t *g, uint16_t *b, uint16_t *c)
 {
     uint8_t idx = getI2CIndex(I2Cx);
 
-    if (_tcs34725Initialised[idx] != 1)
-    {
-        *c = 0;
-        *r = 0;
-        *g = 0;
-        *b = 0;
-        return;
-    }
-
-    if (!read16(I2Cx, TCS34725_CDATAL, c))
-    {
+    if (_tcs34725Initialised[idx] != 1U) {
         *c = 0; *r = 0; *g = 0; *b = 0;
         return;
     }
 
-    if (!read16(I2Cx, TCS34725_RDATAL, r))
-    {
+    if (!read16(I2Cx, TCS34725_CDATAL, c) ||
+        !read16(I2Cx, TCS34725_RDATAL, r) ||
+        !read16(I2Cx, TCS34725_GDATAL, g) ||
+        !read16(I2Cx, TCS34725_BDATAL, b)) {
         *c = 0; *r = 0; *g = 0; *b = 0;
-        return;
-    }
-
-    if (!read16(I2Cx, TCS34725_GDATAL, g))
-    {
-        *c = 0; *r = 0; *g = 0; *b = 0;
-        return;
-    }
-
-    if (!read16(I2Cx, TCS34725_BDATAL, b))
-    {
-        *c = 0; *r = 0; *g = 0; *b = 0;
-        return;
     }
 }
 
-/* Read color from registers: Red, Green, Blue and Clear from Raw Data */
 void getRGB(I2C_TypeDef *I2Cx, int *R, int *G, int *B, uint16_t *c)
 {
     uint16_t rawRed, rawGreen, rawBlue, rawClear;
     getRawData(I2Cx, &rawRed, &rawGreen, &rawBlue, &rawClear);
 
     *c = rawClear;
+    if (rawClear == 0U) {
+        *R = 0; *G = 0; *B = 0;
+        return;
+    }
 
-    if (rawClear == 0)
-    {
-        *R = 0;
-        *G = 0;
-        *B = 0;
-    }
-    else
-    {
-        *R = (int)rawRed   * 255 / rawClear;
-        *G = (int)rawGreen * 255 / rawClear;
-        *B = (int)rawBlue  * 255 / rawClear;
-    }
+    *R = ((int)rawRed * 255) / rawClear;
+    *G = ((int)rawGreen * 255) / rawClear;
+    *B = ((int)rawBlue * 255) / rawClear;
 }
