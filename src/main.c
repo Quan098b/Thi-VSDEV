@@ -69,7 +69,7 @@ static const int16_t allowed_norm[3][3] = {
    IN4 = PB15
    ========================================================= */
 #define PWM_PERIOD              999U
-#define SPEED_SCALE_PERCENT     25U
+#define SPEED_SCALE_PERCENT     30U
 #define MIN_EFFECTIVE_PWM       140U
 #define PWM_FORWARD             850U
 #define PWM_TURN_OUTER          680U
